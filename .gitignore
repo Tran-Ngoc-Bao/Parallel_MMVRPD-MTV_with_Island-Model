@@ -1,0 +1,12 @@
+.claude/
+.vscode/
+.DS_Store
+__pycache__/
+
+build/
+build_test/
+target/
+
+auto_push.sh
+auto_push.log
+nohup.out
