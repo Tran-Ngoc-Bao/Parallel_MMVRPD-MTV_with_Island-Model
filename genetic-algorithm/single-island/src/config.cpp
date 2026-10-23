@@ -1,0 +1,444 @@
+#include "config.hpp"
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <regex>
+#include <stdexcept>
+#include <cmath>
+#include <numbers>
+#include <optional>
+
+// -----------------------------------------------------------------------
+// Distance matrix
+// -----------------------------------------------------------------------
+std::vector<std::vector<double>> distance_matrix(
+    cli::DistanceType type,
+    const std::vector<double>& x,
+    const std::vector<double>& y)
+{
+    std::size_t n = x.size();
+    std::vector<std::vector<double>> m(n, std::vector<double>(n, 0.0));
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            double dx = x[i] - x[j];
+            double dy = y[i] - y[j];
+            if (type == cli::DistanceType::Manhattan)
+                m[i][j] = std::abs(dx) + std::abs(dy);
+            else
+                m[i][j] = std::sqrt(dx*dx + dy*dy);
+        }
+    }
+    return m;
+}
+
+// -----------------------------------------------------------------------
+// DroneConfig::make
+// -----------------------------------------------------------------------
+DroneConfig DroneConfig::make(
+    const std::string& path,
+    cli::EnergyModel   config,
+    cli::ConfigType    speed_type,
+    cli::ConfigType    range_type)
+{
+    auto read_file = [](const std::string& p) -> std::string {
+        std::ifstream f(p);
+        if (!f) throw std::runtime_error("Cannot open file: " + p);
+        return std::string((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+    };
+
+    auto match_cfg = [&](const nlohmann::json& j) -> bool {
+        auto s = j.at("speed_type").get<std::string>();
+        auto r = j.at("range_type").get<std::string>();
+        bool sp = (speed_type == cli::ConfigType::Low) ? (s == "low") : (s == "high");
+        bool rp = (range_type == cli::ConfigType::Low) ? (r == "low") : (r == "high");
+        return sp && rp;
+    };
+
+    DroneConfig dc;
+
+    if (config == cli::EnergyModel::Linear) {
+        auto arr = nlohmann::json::parse(read_file(path));
+        for (auto& entry : arr) {
+            if (!match_cfg(entry)) continue;
+            dc.model         = Model::Linear;
+            dc.takeoff_speed = entry.at("takeoffSpeed [m/s]").get<double>();
+            dc.cruise_speed  = entry.at("cruiseSpeed [m/s]").get<double>();
+            dc.landing_speed = entry.at("landingSpeed [m/s]").get<double>();
+            dc.altitude      = entry.at("cruiseAlt [m]").get<double>();
+            dc.cap           = entry.at("capacity [kg]").get<double>();
+            dc.battery_val   = entry.at("batteryPower [Joule]").get<double>();
+            dc.speed_type    = speed_type;
+            dc.range_type    = range_type;
+            dc.beta          = entry.at("beta(w/kg)").get<double>();
+            dc.gamma         = entry.at("gamma(w)").get<double>();
+            dc._takeoff_time = dc.altitude / dc.takeoff_speed;
+            dc._landing_time = dc.altitude / dc.landing_speed;
+            dc.fixed_time_val= std::numeric_limits<double>::infinity();
+            return dc;
+        }
+        throw std::runtime_error("No matching linear config");
+    }
+
+    if (config == cli::EnergyModel::NonLinear) {
+        auto root = nlohmann::json::parse(read_file(path));
+        double k1 = root.at("k1").get<double>();
+        double k2 = root.at("k2 (sqrt(kg/m))").get<double>();
+        double c1 = root.at("c1 (sqrt(m/kg))").get<double>();
+        double c2 = root.at("c2 (sqrt(m/kg))").get<double>();
+        double c4 = root.at("c4 (kg/m)").get<double>();
+        double c5 = root.at("c5 (Ns/m)").get<double>();
+
+        for (auto& entry : root.at("config")) {
+            if (!match_cfg(entry)) continue;
+            dc.model         = Model::NonLinear;
+            dc.takeoff_speed = entry.at("takeoffSpeed [m/s]").get<double>();
+            dc.cruise_speed  = entry.at("cruiseSpeed [m/s]").get<double>();
+            dc.landing_speed = entry.at("landingSpeed [m/s]").get<double>();
+            dc.altitude      = entry.at("cruiseAlt [m]").get<double>();
+            dc.cap           = entry.at("capacity [kg]").get<double>();
+            dc.battery_val   = entry.at("batteryPower [Joule]").get<double>();
+            dc.speed_type    = speed_type;
+            dc.range_type    = range_type;
+
+            dc._vert_k1            = k1 * G;
+            dc._vert_k2            = G / (k2 * k2);
+            dc._vert_c2            = c2 * std::pow(G, 1.5);
+            dc._vert_half_takeoff  = dc.takeoff_speed / 2.0;
+            dc._vert_half_landing  = dc.landing_speed / 2.0;
+            dc._vert_half_takeoff_2= dc._vert_half_takeoff * dc._vert_half_takeoff;
+            dc._vert_half_landing_2= dc._vert_half_landing * dc._vert_half_landing;
+            dc._hori_c12           = c1 + c2;
+            dc._hori_c4v3          = c4 * dc.cruise_speed * dc.cruise_speed * dc.cruise_speed;
+            dc._hori_c42v4         = c4*c4 * dc.cruise_speed*dc.cruise_speed
+                                            * dc.cruise_speed*dc.cruise_speed;
+            {
+                double deg10  = M_PI / 18.0;
+                double cv     = dc.cruise_speed * std::cos(deg10);
+                dc._hori_c5   = c5 * cv * cv;
+            }
+            dc._takeoff_time = dc.altitude / dc.takeoff_speed;
+            dc._landing_time = dc.altitude / dc.landing_speed;
+            dc.fixed_time_val= std::numeric_limits<double>::infinity();
+            return dc;
+        }
+        throw std::runtime_error("No matching non-linear config");
+    }
+
+    if (config == cli::EnergyModel::Endurance) {
+        auto arr = nlohmann::json::parse(read_file(path));
+        for (auto& entry : arr) {
+            if (!match_cfg(entry)) continue;
+            dc.model         = Model::Endurance;
+            dc.cap           = entry.at("capacity [kg]").get<double>();
+            dc.fixed_time_val= entry.at("FixedTime (s)").get<double>();
+            dc.cruise_speed  = entry.at("V_max (m/s)").get<double>();
+            dc.speed_type    = speed_type;
+            dc.range_type    = range_type;
+            dc.battery_val   = 1.0;
+            dc._takeoff_time = 0.0;
+            dc._landing_time = 0.0;
+            return dc;
+        }
+        throw std::runtime_error("No matching endurance config");
+    }
+
+    // Unlimited
+    dc.model         = Model::Endurance;
+    dc.cap           = std::numeric_limits<double>::infinity();
+    dc.fixed_time_val= std::numeric_limits<double>::infinity();
+    dc.cruise_speed  = 1.0;
+    dc.battery_val   = 1.0;
+    dc._takeoff_time = 0.0;
+    dc._landing_time = 0.0;
+    dc.speed_type    = cli::ConfigType::High;
+    dc.range_type    = cli::ConfigType::High;
+    return dc;
+}
+
+// -----------------------------------------------------------------------
+// build_config from RunArgs
+// -----------------------------------------------------------------------
+Config build_config(const cli::RunArgs& args)
+{
+    auto read_file = [](const std::string& p) -> std::string {
+        std::ifstream f(p);
+        if (!f) throw std::runtime_error("Cannot open file: " + p);
+        return std::string((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+    };
+
+    std::string data = read_file(args.problem);
+
+    // Parse trucks / drones count
+    auto parse_uint = [](const std::string& s) -> std::size_t {
+        return static_cast<std::size_t>(std::stoul(s));
+    };
+
+    std::optional<std::size_t> trucks_count = args.trucks_count;
+    std::optional<std::size_t> drones_count = args.drones_count;
+
+    {
+        std::regex re_trucks(R"(trucks_count (\d+))");
+        std::smatch m;
+        if (!trucks_count && std::regex_search(data, m, re_trucks))
+            trucks_count = parse_uint(m[1].str());
+    }
+    {
+        std::regex re_drones(R"(drones_count (\d+))");
+        std::smatch m;
+        if (!drones_count && std::regex_search(data, m, re_drones))
+            drones_count = parse_uint(m[1].str());
+    }
+    if (!trucks_count) throw std::runtime_error("Missing trucks count");
+    if (!drones_count) throw std::runtime_error("Missing drones count");
+
+    // Parse depot
+    std::pair<double,double> depot;
+    {
+        std::regex re_depot(R"(depot (-?[\d\.]+)\s+(-?[\d\.]+))");
+        std::smatch m;
+        if (!std::regex_search(data, m, re_depot))
+            throw std::runtime_error("Missing depot coordinates");
+        depot = { std::stod(m[1].str()), std::stod(m[2].str()) };
+    }
+
+    // Parse customers (multiline)
+    std::size_t customers_count = 0;
+    std::vector<double> x   = { depot.first  };
+    std::vector<double> y   = { depot.second };
+    std::vector<double> demands = { 0.0 };
+    std::vector<bool>   dronable = { true };
+
+    {
+        std::regex re_cust(
+            R"(^\s*(-?[\d\.]+)\s+(-?[\d\.]+)\s+(0|1)\s+([\d\.]+)\s*$)",
+            std::regex::multiline);
+        auto it  = std::sregex_iterator(data.begin(), data.end(), re_cust);
+        auto end = std::sregex_iterator();
+        for (; it != end; ++it) {
+            ++customers_count;
+            const std::smatch& cm = *it;
+            x.push_back(std::stod(cm[1].str()));
+            y.push_back(std::stod(cm[2].str()));
+            dronable.push_back(cm[3].str() == "1");
+            demands.push_back(std::stod(cm[4].str()));
+        }
+    }
+
+    auto truck_distances = distance_matrix(args.truck_distance, x, y);
+    auto drone_distances = distance_matrix(args.drone_distance, x, y);
+
+    // Parse truck config
+    TruckConfig truck;
+    {
+        auto j = nlohmann::json::parse(read_file(args.truck_cfg));
+        truck.speed    = j.at("V_max (m/s)").get<double>();
+        truck.capacity = j.at("M_t (kg)").get<double>();
+    }
+
+    DroneConfig drone = DroneConfig::make(args.drone_cfg, args.config,
+                                          args.speed_type, args.range_type);
+
+    // Refine dronable based on drone constraints
+    {
+        double takeoff            = drone.takeoff_time();
+        double landing            = drone.landing_time();
+        double takeoff_from_depot = drone.takeoff_power(0.0);
+        double landing_from_depot = drone.landing_power(0.0);
+        double cruise_from_depot  = drone.cruise_power(0.0);
+
+        for (std::size_t i = 1; i <= customers_count; ++i) {
+            if (!dronable[i]) continue;
+            double dem = demands[i];
+            // capacity check
+            if (dem > drone.capacity()) { dronable[i] = false; continue; }
+            // fixed time check
+            double cruise_dist = drone_distances[0][i] + drone_distances[i][0];
+            if (takeoff + drone.cruise_time(cruise_dist) + landing > drone.fixed_time()) {
+                dronable[i] = false; continue;
+            }
+            // energy check
+            double energy =
+                (landing_from_depot + drone.landing_power(dem)) * landing
+                + drone.cruise_power(dem) * drone.cruise_time(drone_distances[i][0])
+                + (takeoff_from_depot + drone.takeoff_power(dem)) * takeoff
+                + cruise_from_depot * drone.cruise_time(drone_distances[0][i]);
+            if (energy > drone.battery()) { dronable[i] = false; }
+        }
+    }
+
+    Config cfg;
+    cfg.customers_count           = customers_count;
+    cfg.trucks_count              = *trucks_count;
+    cfg.drones_count              = *drones_count;
+    cfg.x                         = std::move(x);
+    cfg.y                         = std::move(y);
+    cfg.demands                   = std::move(demands);
+    cfg.dronable                  = std::move(dronable);
+    cfg.truck_distance            = args.truck_distance;
+    cfg.drone_distance            = args.drone_distance;
+    cfg.truck_distances           = std::move(truck_distances);
+    cfg.drone_distances           = std::move(drone_distances);
+    cfg.truck                     = truck;
+    cfg.drone                     = drone;
+    cfg.problem                   = args.problem;
+    cfg.config                    = args.config;
+    cfg.speed_type                = args.speed_type;
+    cfg.range_type                = args.range_type;
+    cfg.waiting_time_limit        = args.waiting_time_limit;
+    cfg.time_limit                = args.time_limit;
+    cfg.max_evaluations           = args.max_evaluations;
+    cfg.penalty_exponent          = args.penalty_exponent;
+    cfg.single_truck_route        = args.single_truck_route;
+    cfg.single_drone_route        = args.single_drone_route;
+    cfg.verbose                   = args.verbose;
+    cfg.outputs                   = args.outputs;
+    cfg.disable_logging           = args.disable_logging;
+    cfg.dry_run                   = args.dry_run;
+    cfg.extra                     = args.extra;
+    cfg.seed                      = args.seed;
+    cfg.compact_output            = args.compact_output;
+    cfg.run_id                    = args.run_id;
+    cfg.initial_pop               = args.initial_pop;
+    cfg.max_pop                   = args.max_pop ? args.max_pop : 2 * args.initial_pop;
+    cfg.ls_neighbors              = args.ls_neighbors;
+    cfg.max_stagnation            = args.max_stagnation;
+    cfg.max_iterations            = args.max_iterations;
+    return cfg;
+}
+
+// -----------------------------------------------------------------------
+// JSON helpers for config serialization
+// -----------------------------------------------------------------------
+static std::string energy_model_str(cli::EnergyModel m) {
+    switch(m) {
+        case cli::EnergyModel::Linear:    return "linear";
+        case cli::EnergyModel::NonLinear: return "non-linear";
+        case cli::EnergyModel::Endurance: return "endurance";
+        case cli::EnergyModel::Unlimited: return "unlimited";
+    }
+    return "";
+}
+static std::string config_type_str(cli::ConfigType c) {
+    return c == cli::ConfigType::Low ? "low" : "high";
+}
+static std::string distance_str(cli::DistanceType d) {
+    return d == cli::DistanceType::Manhattan ? "manhattan" : "euclidean";
+}
+
+static nlohmann::json drone_config_to_json(const DroneConfig& dc) {
+    nlohmann::json j;
+    std::string speed = config_type_str(dc.speed_type);
+    std::string range = config_type_str(dc.range_type);
+    switch (dc.model) {
+        case DroneConfig::Model::Linear:
+            j["config"] = "Linear";
+            j["_data"] = {
+                {"takeoffSpeed [m/s]", dc.takeoff_speed},
+                {"cruiseSpeed [m/s]",  dc.cruise_speed},
+                {"landingSpeed [m/s]", dc.landing_speed},
+                {"cruiseAlt [m]",      dc.altitude},
+                {"capacity [kg]",      dc.cap},
+                {"batteryPower [Joule]", dc.battery_val},
+                {"speed_type",         speed},
+                {"range_type",         range},
+                {"beta(w/kg)",         dc.beta},
+                {"gamma(w)",           dc.gamma}
+            };
+            j["_takeoff_time"] = dc._takeoff_time;
+            j["_landing_time"] = dc._landing_time;
+            break;
+        case DroneConfig::Model::NonLinear:
+            j["config"] = "NonLinear";
+            j["_data"] = {
+                {"takeoffSpeed [m/s]", dc.takeoff_speed},
+                {"cruiseSpeed [m/s]",  dc.cruise_speed},
+                {"landingSpeed [m/s]", dc.landing_speed},
+                {"cruiseAlt [m]",      dc.altitude},
+                {"capacity [kg]",      dc.cap},
+                {"batteryPower [Joule]", dc.battery_val},
+                {"speed_type",         speed},
+                {"range_type",         range}
+            };
+            j["_vert_k1"]             = dc._vert_k1;
+            j["_vert_k2"]             = dc._vert_k2;
+            j["_vert_c2"]             = dc._vert_c2;
+            j["_vert_half_takeoff"]   = dc._vert_half_takeoff;
+            j["_vert_half_landing"]   = dc._vert_half_landing;
+            j["_vert_half_takeoff_2"] = dc._vert_half_takeoff_2;
+            j["_vert_half_landing_2"] = dc._vert_half_landing_2;
+            j["_hori_c12"]            = dc._hori_c12;
+            j["_hori_c4v3"]           = dc._hori_c4v3;
+            j["_hori_c42v4"]          = dc._hori_c42v4;
+            j["_hori_c5"]             = dc._hori_c5;
+            j["_takeoff_time"]        = dc._takeoff_time;
+            j["_landing_time"]        = dc._landing_time;
+            break;
+        case DroneConfig::Model::Endurance:
+            j["config"] = "Endurance";
+            j["_data"] = {
+                {"speed_type",         speed},
+                {"range_type",         range},
+                {"capacity [kg]",      dc.cap},
+                {"FixedTime (s)",      dc.fixed_time_val},
+                {"V_max (m/s)",        dc.cruise_speed}
+            };
+            break;
+    }
+    return j;
+}
+
+nlohmann::json config_to_json(const Config& cfg) {
+    nlohmann::json j;
+    j["customers_count"]           = cfg.customers_count;
+    j["trucks_count"]              = cfg.trucks_count;
+    j["drones_count"]              = cfg.drones_count;
+    j["x"]                         = cfg.x;
+    j["y"]                         = cfg.y;
+    j["demands"]                   = cfg.demands;
+    j["dronable"]                  = cfg.dronable;
+    j["truck_distance"]            = distance_str(cfg.truck_distance);
+    j["drone_distance"]            = distance_str(cfg.drone_distance);
+    j["truck"]                     = {{"V_max (m/s)", cfg.truck.speed},
+                                      {"M_t (kg)",    cfg.truck.capacity}};
+    j["drone"]                     = drone_config_to_json(cfg.drone);
+    j["problem"]                   = cfg.problem;
+    j["config"]                    = energy_model_str(cfg.config);
+    j["speed_type"]                = config_type_str(cfg.speed_type);
+    j["range_type"]                = config_type_str(cfg.range_type);
+    j["waiting_time_limit"]        = cfg.waiting_time_limit;
+    if (cfg.seed)
+        j["seed"]                  = *cfg.seed;
+    else
+        j["seed"]                  = nullptr;
+    j["time_limit"]                = cfg.time_limit;
+    j["max_evaluations"]           = cfg.max_evaluations;
+    j["penalty_exponent"]          = cfg.penalty_exponent;
+    j["single_truck_route"]        = cfg.single_truck_route;
+    j["single_drone_route"]        = cfg.single_drone_route;
+    j["verbose"]                   = cfg.verbose;
+    j["outputs"]                   = cfg.outputs;
+    j["disable_logging"]           = cfg.disable_logging;
+    j["dry_run"]                   = cfg.dry_run;
+    j["extra"]                     = cfg.extra;
+    j["compact_output"]            = cfg.compact_output;
+    j["run_id"]                    = cfg.run_id;
+    j["initial_pop"]               = cfg.initial_pop;
+    j["max_pop"]                   = cfg.max_pop;
+    j["ls_neighbors"]              = cfg.ls_neighbors;
+    j["max_stagnation"]            = cfg.max_stagnation;
+    j["max_iterations"]            = cfg.max_iterations;
+    return j;
+}
+
+// -----------------------------------------------------------------------
+// Global singleton
+// -----------------------------------------------------------------------
+Config* g_config_ptr = nullptr;
+
+void set_global_config(Config cfg) {
+    static Config storage;
+    storage      = std::move(cfg);
+    g_config_ptr = &storage;
+}

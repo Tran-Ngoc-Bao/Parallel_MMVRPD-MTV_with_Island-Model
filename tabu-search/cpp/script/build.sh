@@ -32,7 +32,7 @@ if [ "${MODE}" = "pgo" ]; then
     cmake --build "${BUILD_DIR}" --clean-first
 
     echo "=== PGO: collecting profile data ==="
-    (cd "${PROJECT_DIR}" && "${BUILD_DIR}/sequence" run "${PROFILE_PROBLEM}" \
+    (cd "${PROJECT_DIR}" && "${BUILD_DIR}/tabu-search" run "${PROFILE_PROBLEM}" \
         --disable-logging > /dev/null 2>&1)
     echo "    profile data written to ${BUILD_DIR}/pgo-data/"
 

@@ -25,7 +25,7 @@ case "${OUTPUTS_DIR}" in
 esac
 
 CMD=(
-  "${BUILD_DIR}/sequence" run
+  "${BUILD_DIR}/tabu-search" run
   "${PROBLEM_FILE}"
   --outputs "${OUTPUTS_DIR}"
 )

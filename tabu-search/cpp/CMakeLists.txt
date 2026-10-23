@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(sequence CXX)
+project(tabu-search CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,7 @@ option(PGO_USE      "Compile with PGO profile data"                OFF)
 set(PGO_DATA_DIR "${CMAKE_BINARY_DIR}/pgo-data"
     CACHE PATH "Directory for PGO profile data files")
 
-add_executable(sequence
+add_executable(tabu-search
     src/main.cpp
     src/config.cpp
     src/logger.cpp
@@ -48,23 +48,23 @@ add_executable(sequence
     src/solutions.cpp
 )
 
-target_include_directories(sequence PRIVATE src)
-target_link_libraries(sequence PRIVATE CLI11::CLI11 nlohmann_json::nlohmann_json mimalloc-static)
+target_include_directories(tabu-search PRIVATE src)
+target_link_libraries(tabu-search PRIVATE CLI11::CLI11 nlohmann_json::nlohmann_json mimalloc-static)
 
 if(MSVC)
-    target_compile_options(sequence PRIVATE /W3 /O2)
+    target_compile_options(tabu-search PRIVATE /W3 /O2)
 else()
-    target_compile_options(sequence PRIVATE
+    target_compile_options(tabu-search PRIVATE
         -Wall -Wextra -O3 -march=native -flto -fno-rtti)
-    target_link_options(sequence PRIVATE -flto)
+    target_link_options(tabu-search PRIVATE -flto)
 
     if(PGO_GENERATE)
         file(MAKE_DIRECTORY "${PGO_DATA_DIR}")
-        target_compile_options(sequence PRIVATE -fprofile-generate=${PGO_DATA_DIR})
-        target_link_options(sequence   PRIVATE -fprofile-generate=${PGO_DATA_DIR})
+        target_compile_options(tabu-search PRIVATE -fprofile-generate=${PGO_DATA_DIR})
+        target_link_options(tabu-search   PRIVATE -fprofile-generate=${PGO_DATA_DIR})
     elseif(PGO_USE)
-        target_compile_options(sequence PRIVATE
+        target_compile_options(tabu-search PRIVATE
             -fprofile-use=${PGO_DATA_DIR} -fprofile-correction)
-        target_link_options(sequence   PRIVATE -fprofile-use=${PGO_DATA_DIR})
+        target_link_options(tabu-search   PRIVATE -fprofile-use=${PGO_DATA_DIR})
     endif()
 endif()

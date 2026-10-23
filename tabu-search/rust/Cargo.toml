@@ -1,5 +1,5 @@
 [package]
-name = "sequence"
+name = "tabu-search"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,5 +22,5 @@ panic = "abort"
 strip = true
 
 [[bin]]
-name = "sequence"
+name = "tabu-search"
 path = "src/main.rs"

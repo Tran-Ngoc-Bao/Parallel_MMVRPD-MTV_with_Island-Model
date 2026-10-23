@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
-BIN="${PROJECT_DIR}/target/release/sequence"
+BIN="${PROJECT_DIR}/target/release/tabu-search"
 
 DEFAULT_DATA_PREFIX="200"
 PROBLEM_FILE="${1:-${PROJECT_DIR}/../../data/${DEFAULT_DATA_PREFIX}.40.4.txt}"
